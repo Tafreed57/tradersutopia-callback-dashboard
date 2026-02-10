@@ -33,6 +33,12 @@ yarn-error.log*
 # env files (can opt-in for committing if needed)
 .env*
 
+# Google service account key — never commit
+service-account.json
+*-credentials*.json
+*service*account*.json
+tradersutopia-callbacks*.json
+
 # vercel
 .vercel
 
