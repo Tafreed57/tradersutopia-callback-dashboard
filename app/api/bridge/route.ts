@@ -11,8 +11,9 @@ export const runtime = "nodejs";
 
 function handleBridge(req: NextRequest) {
   const leadPhone = req.nextUrl.searchParams.get("lead") || "";
+  const fullUrl = req.nextUrl.toString();
 
-  console.log(`[bridge] lead=${leadPhone}`);
+  console.log(`[bridge] lead=${leadPhone}, url=${fullUrl}`);
 
   if (!leadPhone || !isE164(leadPhone)) {
     console.warn("[bridge] Invalid or missing lead phone");

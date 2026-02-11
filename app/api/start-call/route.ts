@@ -68,6 +68,7 @@ export async function POST(req: NextRequest) {
     // ── Determine public base URL ──
     const { getPublicBaseUrl } = await import("@/lib/base-url");
     const publicBaseUrl = getPublicBaseUrl(req.headers.get("host"));
+    console.log(`[start-call] publicBaseUrl=${publicBaseUrl}, VERCEL_URL=${process.env.VERCEL_URL || "(not set)"}, host=${req.headers.get("host")}`);
 
     if (!publicBaseUrl || publicBaseUrl.includes("localhost")) {
       return NextResponse.json(
