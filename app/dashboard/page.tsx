@@ -121,7 +121,9 @@ export default function DashboardPage() {
         sort: "createdAt",
         order: sortOrder,
       });
-      const res = await fetch(`/api/leads?${params}`);
+      const res = await fetch(`/api/leads?${params}&t=${Date.now()}`, {
+        cache: "no-store",
+      });
       const data = await res.json();
       if (data.ok) setLeads(data.leads);
       else console.error("Fetch leads error:", data.error);
@@ -145,7 +147,9 @@ export default function DashboardPage() {
   // ── Live Calls ─────────────────────────────────────────────────────────────
   const fetchLiveCalls = useCallback(async () => {
     try {
-      const res = await fetch("/api/live-calls?status=LIVE");
+      const res = await fetch("/api/live-calls?status=LIVE&t=" + Date.now(), {
+        cache: "no-store",
+      });
       const data = await res.json();
       if (data.ok) setLiveCalls(data.calls);
     } catch (err) {
@@ -159,7 +163,7 @@ export default function DashboardPage() {
 
   useEffect(() => {
     if (!isAuth || !phoneSet) return;
-    const interval = setInterval(fetchLiveCalls, 10000);
+    const interval = setInterval(fetchLiveCalls, 5000);
     return () => clearInterval(interval);
   }, [isAuth, phoneSet, fetchLiveCalls]);
 

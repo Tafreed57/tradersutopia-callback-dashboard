@@ -21,7 +21,10 @@ export async function GET(req: NextRequest) {
       | "all";
 
     const calls = await withRetry(() => getLiveCalls({ status }));
-    return NextResponse.json({ ok: true, calls });
+    return NextResponse.json(
+      { ok: true, calls },
+      { headers: { "Cache-Control": "no-store, no-cache, must-revalidate" } }
+    );
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : "Unknown error";
     console.error("[GET /api/live-calls] Error:", message);
