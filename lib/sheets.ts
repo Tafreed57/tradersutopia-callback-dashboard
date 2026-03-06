@@ -35,6 +35,8 @@ const LIVE_CALLS_TAB = () =>
   process.env.GOOGLE_SHEET_LIVE_CALLS_TAB || "Live Calls";
 const PUSH_SUBS_TAB = () =>
   process.env.GOOGLE_SHEET_PUSH_SUBS_TAB || "Push Subscriptions";
+const PUSH_NOTIFIED_TAB = () =>
+  process.env.GOOGLE_SHEET_PUSH_NOTIFIED_TAB || "Push Notified";
 
 // "Callback Queue" tab uses different columns; we map them to our Lead shape
 const IS_QUEUE_LAYOUT = () =>
@@ -580,6 +582,78 @@ export async function getAllPushSubscriptions(): Promise<PushSub[]> {
     auth: row[2] || "",
     createdAt: row[3] || "",
   }));
+}
+
+// ── Push Notified (track which live calls we already sent push for) ───────────
+
+const PUSH_NOTIFIED_HEADERS = ["agent_number", "conference_name", "notified_at"];
+const NOTIFIED_WINDOW_MS = 2 * 60 * 1000; // 2 minutes
+
+async function ensurePushNotifiedSheet() {
+  const sheets = getSheets();
+  const spreadsheetId = SHEET_ID();
+  const tab = PUSH_NOTIFIED_TAB();
+
+  const meta = await sheets.spreadsheets.get({ spreadsheetId });
+  const existingTabs = (meta.data.sheets || []).map(
+    (s) => s.properties?.title
+  );
+
+  if (!existingTabs.includes(tab)) {
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId,
+      requestBody: {
+        requests: [{ addSheet: { properties: { title: tab } } }],
+      },
+    });
+    await ensureHeaders(sheets, spreadsheetId, tab, PUSH_NOTIFIED_HEADERS);
+  }
+}
+
+/** Returns set of "agentNumber::conferenceName" that were notified in the last NOTIFIED_WINDOW_MS */
+export async function getAlreadyNotifiedRecent(): Promise<Set<string>> {
+  const sheets = getSheets();
+  const spreadsheetId = SHEET_ID();
+  const tab = PUSH_NOTIFIED_TAB();
+
+  await ensurePushNotifiedSheet();
+
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId,
+    range: `${tab}!A2:C`,
+  });
+
+  const rows = res.data.values || [];
+  const since = Date.now() - NOTIFIED_WINDOW_MS;
+  const set = new Set<string>();
+
+  for (const row of rows) {
+    const notifiedAt = row[2] ? new Date(row[2]).getTime() : 0;
+    if (notifiedAt >= since) {
+      set.add(`${(row[0] || "").trim()}::${(row[1] || "").trim()}`);
+    }
+  }
+  return set;
+}
+
+export async function recordPushNotified(
+  agentNumber: string,
+  conferenceName: string
+): Promise<void> {
+  const sheets = getSheets();
+  const spreadsheetId = SHEET_ID();
+  const tab = PUSH_NOTIFIED_TAB();
+
+  await ensurePushNotifiedSheet();
+
+  await sheets.spreadsheets.values.append({
+    spreadsheetId,
+    range: `${tab}!A:C`,
+    valueInputOption: "RAW",
+    requestBody: {
+      values: [[agentNumber, conferenceName, new Date().toISOString()]],
+    },
+  });
 }
 
 // ── Append to CallLogs ────────────────────────────────────────────────────────

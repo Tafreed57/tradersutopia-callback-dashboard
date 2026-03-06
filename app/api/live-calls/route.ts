@@ -3,9 +3,9 @@
  * Query params: status (LIVE | ENDED | all, default: LIVE)
  * Returns current live/ended call entries from the "Live Calls" sheet.
  *
- * Also detects NEW live calls and fires push notifications automatically —
- * no external trigger needed. Uses in-memory set to track which
- * agent+conference combos have already been notified.
+ * Detects NEW live calls and sends push notifications. Uses "Push Notified"
+ * sheet to track which agent+conference we already notified (works across
+ * serverless invocations). We AWAIT the push so it completes before response.
  */
 
 import { NextRequest, NextResponse } from "next/server";
@@ -14,6 +14,8 @@ import {
   ensureSheetsReady,
   getAllPushSubscriptions,
   removePushSubscription,
+  getAlreadyNotifiedRecent,
+  recordPushNotified,
   type LiveCall,
 } from "@/lib/sheets";
 import { withRetry } from "@/lib/retry";
@@ -26,69 +28,74 @@ const VAPID_PUBLIC = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY || "";
 const VAPID_PRIVATE = process.env.VAPID_PRIVATE_KEY || "";
 const VAPID_EMAIL = process.env.VAPID_EMAIL || "mailto:admin@tradersutopia.com";
 
-// Track which calls we've already sent push for (survives across requests in same serverless instance)
-const notifiedCalls = new Set<string>();
-
 function callKey(c: LiveCall): string {
   return `${c.agentNumber}::${c.conferenceName}`;
 }
 
-async function sendPushForNewCalls(liveCalls: LiveCall[]) {
-  if (!VAPID_PUBLIC || !VAPID_PRIVATE) return;
-
-  const newCalls = liveCalls.filter((c) => !notifiedCalls.has(callKey(c)));
-  if (newCalls.length === 0) return;
-
-  // Mark as notified immediately to prevent duplicate sends
-  for (const c of newCalls) notifiedCalls.add(callKey(c));
-
-  // Prune old entries (keep set from growing forever)
-  if (notifiedCalls.size > 500) {
-    const liveKeys = new Set(liveCalls.map(callKey));
-    for (const key of notifiedCalls) {
-      if (!liveKeys.has(key)) notifiedCalls.delete(key);
-    }
+async function sendPushForNewCalls(liveCalls: LiveCall[]): Promise<void> {
+  if (!VAPID_PUBLIC || !VAPID_PRIVATE) {
+    console.log("[live-calls] Push skip: VAPID keys not set");
+    return;
   }
 
-  try {
-    webpush.setVapidDetails(VAPID_EMAIL, VAPID_PUBLIC, VAPID_PRIVATE);
-    const subs = await getAllPushSubscriptions();
-    if (subs.length === 0) return;
+  const alreadyNotified = await getAlreadyNotifiedRecent();
+  const newCalls = liveCalls.filter((c) => !alreadyNotified.has(callKey(c)));
+  if (newCalls.length === 0) return;
 
-    for (const call of newCalls) {
-      const ts = call.startTime ? new Date(call.startTime) : new Date();
-      const timeStr = ts.toLocaleTimeString("en-US", {
-        hour: "numeric",
-        minute: "2-digit",
-        timeZone: "America/Toronto",
-      });
+  const subs = await getAllPushSubscriptions();
+  if (subs.length === 0) {
+    console.log("[live-calls] Push skip: no subscriptions");
+    return;
+  }
 
-      const payload = JSON.stringify({
-        title: "Inbound Call Taken",
-        body: `Agent ${call.agentNumber} took a call at ${timeStr} ET`,
-        url: "/dashboard",
-        tag: "tu-call-" + call.conferenceName.slice(-8),
-      });
+  console.log(
+    `[live-calls] Push: ${newCalls.length} new call(s), ${subs.length} subscriber(s)`
+  );
 
-      await Promise.allSettled(
-        subs.map(async (sub) => {
-          try {
-            await webpush.sendNotification(
-              { endpoint: sub.endpoint, keys: { p256dh: sub.p256dh, auth: sub.auth } },
-              payload
-            );
-          } catch (err: unknown) {
-            const code = err && typeof err === "object" && "statusCode" in err
-              ? (err as { statusCode: number }).statusCode : 0;
-            if (code === 410 || code === 404) {
-              await removePushSubscription(sub.endpoint).catch(() => {});
-            }
+  webpush.setVapidDetails(VAPID_EMAIL, VAPID_PUBLIC, VAPID_PRIVATE);
+
+  for (const call of newCalls) {
+    const ts = call.startTime ? new Date(call.startTime) : new Date();
+    const timeStr = ts.toLocaleTimeString("en-US", {
+      hour: "numeric",
+      minute: "2-digit",
+      timeZone: "America/Toronto",
+    });
+
+    const payload = JSON.stringify({
+      title: "Inbound Call Taken",
+      body: `Agent ${call.agentNumber} took a call at ${timeStr} ET`,
+      url: "/dashboard",
+      tag: "tu-call-" + call.conferenceName.slice(-8),
+    });
+
+    let sent = 0;
+    await Promise.allSettled(
+      subs.map(async (sub) => {
+        try {
+          await webpush.sendNotification(
+            {
+              endpoint: sub.endpoint,
+              keys: { p256dh: sub.p256dh, auth: sub.auth },
+            },
+            payload
+          );
+          sent++;
+        } catch (err: unknown) {
+          const code =
+            err && typeof err === "object" && "statusCode" in err
+              ? (err as { statusCode: number }).statusCode
+              : 0;
+          if (code === 410 || code === 404) {
+            await removePushSubscription(sub.endpoint).catch(() => {});
           }
-        })
-      );
-    }
-  } catch (err) {
-    console.error("[live-calls] Push send error (non-fatal):", err);
+          console.error("[live-calls] Push send failed for one sub:", code, err);
+        }
+      })
+    );
+
+    console.log(`[live-calls] Push sent for ${call.agentNumber}: ${sent}/${subs.length}`);
+    await recordPushNotified(call.agentNumber, call.conferenceName);
   }
 }
 
@@ -103,10 +110,9 @@ export async function GET(req: NextRequest) {
 
     const calls = await withRetry(() => getLiveCalls({ status }));
 
-    // Fire-and-forget: detect new LIVE calls and send push notifications
     if (status === "LIVE" || status === "all") {
       const liveCalls = calls.filter((c) => c.status === "LIVE");
-      sendPushForNewCalls(liveCalls).catch(() => {});
+      await sendPushForNewCalls(liveCalls);
     }
 
     return NextResponse.json(
