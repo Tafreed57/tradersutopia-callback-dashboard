@@ -14,6 +14,9 @@ const SPREADSHEET_ID = "1LI71rRtGbdPQ8wgSD-QIobDvOc5Yro0lTYgW3_eMDKs";
 const SHEET_NAME = "Callback Queue";
 const LIVE_CALLS_TAB = "Live Calls";
 
+const VERCEL_PUSH_URL = "https://tradersutopia-callback-dashboard.vercel.app/api/push/send";
+const PUSH_SEND_SECRET = "tu-push-secret-2026";
+
 
 const LIVE_CALLS_HEADERS = [
   "Agent Number",
@@ -160,23 +163,42 @@ function handleAgentOnCall(ss, data) {
     const sheet = getOrCreateSheet_(ss, LIVE_CALLS_TAB, LIVE_CALLS_HEADERS);
 
     const newRow = sheet.getLastRow() + 1;
+    const ts = data.timestamp || new Date().toISOString();
     const values = [
       data.agent,
       data.conference_name,
       data.caller_number,
-      data.timestamp || new Date().toISOString(),
+      ts,
       "LIVE",
       "",
       ""
     ];
     sheet.getRange(newRow, 1, 1, values.length).setValues([values]);
-    // Force columns A and C to plain text so Sheets doesn't strip the "+"
     sheet.getRange(newRow, 1).setNumberFormat("@");
     sheet.getRange(newRow, 3).setNumberFormat("@");
 
     Logger.log("Agent " + data.agent + " is LIVE on " + data.conference_name);
   } finally {
     lock.releaseLock();
+  }
+
+  // Trigger push notification via Vercel (fire after sheet write, outside lock)
+  try {
+    UrlFetchApp.fetch(VERCEL_PUSH_URL, {
+      method: "post",
+      contentType: "application/json",
+      headers: { "x-push-secret": PUSH_SEND_SECRET },
+      payload: JSON.stringify({
+        agent: data.agent || "",
+        caller_number: data.caller_number || "",
+        conference_name: data.conference_name || "",
+        timestamp: data.timestamp || new Date().toISOString()
+      }),
+      muteHttpExceptions: true
+    });
+    Logger.log("Push trigger sent for agent " + data.agent);
+  } catch (pushErr) {
+    Logger.log("Push trigger failed (non-fatal): " + pushErr);
   }
 }
 
