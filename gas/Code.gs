@@ -14,6 +14,7 @@ const SPREADSHEET_ID = "1LI71rRtGbdPQ8wgSD-QIobDvOc5Yro0lTYgW3_eMDKs";
 const SHEET_NAME = "Callback Queue";
 const LIVE_CALLS_TAB = "Live Calls";
 
+
 const LIVE_CALLS_HEADERS = [
   "Agent Number",
   "Conference Name",
@@ -72,20 +73,80 @@ function doGet(e) {
 // ── Event Handlers ───────────────────────────────────────────────────────────
 
 /**
- * Original callback_requested handler — preserved exactly as-is.
- * Appends a row to the "Callback Queue" sheet.
+ * callback_requested — caller requests a callback.
+ *
+ * Deduplication: if the same caller number already has a row, update it
+ * in-place (reset status to NEW, refresh timestamp/callSid) rather than
+ * appending a duplicate. The row keeps its existing notes and assigned_to.
+ *
+ * Columns: A=created_at, B=caller, C=tag, D=status, E=assigned_to,
+ *          F=notes, G=call_sid, H=called_number, I=digits
  */
 function handleCallbackRequested(ss, data, tag) {
-  const sheet = ss.getSheetByName(SHEET_NAME);
-  if (!sheet) throw new Error("Sheet tab not found: " + SHEET_NAME);
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    const sheet = ss.getSheetByName(SHEET_NAME);
+    if (!sheet) throw new Error("Sheet tab not found: " + SHEET_NAME);
 
-  const createdAt = new Date();
-  const caller = data.caller || data.From || "";
-  const calledNumber = data.called_number || data.To || "";
-  const callSid = data.call_sid || data.CallSid || "";
-  const digits = data.digits || data.Digits || "";
+    const createdAt = new Date();
+    const caller = data.caller || data.From || "";
+    const calledNumber = data.called_number || data.To || "";
+    const callSid = data.call_sid || data.CallSid || "";
+    const digits = data.digits || data.Digits || "";
 
-  sheet.appendRow([createdAt, caller, tag, "NEW", "", "", callSid, calledNumber, digits]);
+    const normalize = (n) => String(n).trim().replace(/^\+/, "").replace(/\D/g, "");
+    const incomingCaller = normalize(caller);
+
+    if (!incomingCaller) {
+      sheet.appendRow([createdAt, caller, tag, "NEW", "", "", callSid, calledNumber, digits]);
+      return;
+    }
+
+    // Search for existing row with same caller number
+    const lastRow = sheet.getLastRow();
+    let matchRow = -1;
+
+    if (lastRow >= 2) {
+      const callerCol = sheet.getRange(2, 2, lastRow - 1, 1).getValues(); // column B
+      for (let i = 0; i < callerCol.length; i++) {
+        if (normalize(callerCol[i][0]) === incomingCaller) {
+          matchRow = i + 2; // sheet row (1-indexed, +1 for header)
+          break;
+        }
+      }
+    }
+
+    if (matchRow > 0) {
+      // Update existing row: refresh timestamp, status, call_sid — keep notes & assigned_to
+      sheet.getRange(matchRow, 1).setValue(createdAt);        // A: created_at
+      sheet.getRange(matchRow, 3).setValue(tag);               // C: tag
+      sheet.getRange(matchRow, 4).setValue("NEW");             // D: status → NEW
+      sheet.getRange(matchRow, 7).setValue(callSid);           // G: call_sid
+      sheet.getRange(matchRow, 8).setValue(calledNumber);      // H: called_number
+      sheet.getRange(matchRow, 9).setValue(digits);            // I: digits
+
+      // Move to row 2 (top of data, right under header) if not already there
+      if (matchRow > 2) {
+        const rowRange = sheet.getRange(matchRow, 1, 1, 9);
+        const rowData = rowRange.getValues();
+        sheet.deleteRow(matchRow);
+        sheet.insertRowAfter(1);
+        sheet.getRange(2, 1, 1, 9).setValues(rowData);
+      }
+
+      Logger.log("Updated existing row for caller " + caller + " → moved to top");
+    } else {
+      // New caller — insert at row 2 (top of data) instead of appending to bottom
+      sheet.insertRowAfter(1);
+      sheet.getRange(2, 1, 1, 9).setValues([
+        [createdAt, caller, tag, "NEW", "", "", callSid, calledNumber, digits]
+      ]);
+      Logger.log("New callback from " + caller + " → inserted at top");
+    }
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 /**
@@ -98,7 +159,8 @@ function handleAgentOnCall(ss, data) {
   try {
     const sheet = getOrCreateSheet_(ss, LIVE_CALLS_TAB, LIVE_CALLS_HEADERS);
 
-    sheet.appendRow([
+    const newRow = sheet.getLastRow() + 1;
+    const values = [
       data.agent,
       data.conference_name,
       data.caller_number,
@@ -106,7 +168,11 @@ function handleAgentOnCall(ss, data) {
       "LIVE",
       "",
       ""
-    ]);
+    ];
+    sheet.getRange(newRow, 1, 1, values.length).setValues([values]);
+    // Force columns A and C to plain text so Sheets doesn't strip the "+"
+    sheet.getRange(newRow, 1).setNumberFormat("@");
+    sheet.getRange(newRow, 3).setNumberFormat("@");
 
     Logger.log("Agent " + data.agent + " is LIVE on " + data.conference_name);
   } finally {
@@ -151,14 +217,18 @@ function handleAgentCallEnded(ss, data) {
     const dataRange = sheet.getRange(2, 1, lastRow - 1, LIVE_CALLS_HEADERS.length);
     const values = dataRange.getValues();
 
+    // Normalize phone: strip "+" so we match regardless of Sheets formatting
+    const normalize = (n) => String(n).trim().replace(/^\+/, "");
+    const incomingAgent = normalize(data.agent);
+
     // Search from bottom (most recent) to top.
     // Match on: Agent Number (col 0) + Conference Name (col 1) + Status "LIVE" (col 4)
     for (let i = values.length - 1; i >= 0; i--) {
-      const rowAgent = String(values[i][0]).trim();
+      const rowAgent = normalize(values[i][0]);
       const rowConference = String(values[i][1]).trim();
       const rowStatus = String(values[i][4]).trim();
 
-      if (rowAgent === data.agent &&
+      if (rowAgent === incomingAgent &&
           rowConference === data.conference_name &&
           rowStatus === "LIVE") {
 
@@ -179,6 +249,36 @@ function handleAgentCallEnded(ss, data) {
   } finally {
     lock.releaseLock();
   }
+}
+
+// ── Maintenance ──────────────────────────────────────────────────────────────
+
+/**
+ * Run this manually from the GAS editor (Run → clearStaleLiveCalls)
+ * to mark all currently LIVE rows as ENDED.
+ */
+function clearStaleLiveCalls() {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const sheet = ss.getSheetByName(LIVE_CALLS_TAB);
+  if (!sheet) { Logger.log("No Live Calls sheet."); return; }
+
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) { Logger.log("No data rows."); return; }
+
+  const dataRange = sheet.getRange(2, 1, lastRow - 1, LIVE_CALLS_HEADERS.length);
+  const values = dataRange.getValues();
+  let cleared = 0;
+
+  for (let i = 0; i < values.length; i++) {
+    if (String(values[i][4]).trim() === "LIVE") {
+      const sheetRow = i + 2;
+      sheet.getRange(sheetRow, 5).setValue("ENDED");
+      sheet.getRange(sheetRow, 7).setValue(new Date().toISOString());
+      cleared++;
+    }
+  }
+
+  Logger.log("Cleared " + cleared + " stale LIVE rows.");
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
