@@ -33,6 +33,8 @@ const CALLBACKS_TAB = () =>
 const LOGS_TAB = () => process.env.GOOGLE_SHEET_LOGS_TAB || "CallLogs";
 const LIVE_CALLS_TAB = () =>
   process.env.GOOGLE_SHEET_LIVE_CALLS_TAB || "Live Calls";
+const PUSH_SUBS_TAB = () =>
+  process.env.GOOGLE_SHEET_PUSH_SUBS_TAB || "Push Subscriptions";
 
 // "Callback Queue" tab uses different columns; we map them to our Lead shape
 const IS_QUEUE_LAYOUT = () =>
@@ -451,6 +453,133 @@ export async function getLiveCalls(opts?: {
   }
 
   return calls;
+}
+
+// ── Push Subscriptions ────────────────────────────────────────────────────────
+
+export interface PushSub {
+  endpoint: string;
+  p256dh: string;
+  auth: string;
+  createdAt: string;
+}
+
+const PUSH_SUBS_HEADERS = ["endpoint", "p256dh", "auth", "createdAt"];
+
+async function ensurePushSubsSheet() {
+  const sheets = getSheets();
+  const spreadsheetId = SHEET_ID();
+  const tab = PUSH_SUBS_TAB();
+
+  const meta = await sheets.spreadsheets.get({ spreadsheetId });
+  const existingTabs = (meta.data.sheets || []).map(
+    (s) => s.properties?.title
+  );
+
+  if (!existingTabs.includes(tab)) {
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId,
+      requestBody: {
+        requests: [{ addSheet: { properties: { title: tab } } }],
+      },
+    });
+    await ensureHeaders(sheets, spreadsheetId, tab, PUSH_SUBS_HEADERS);
+  }
+}
+
+export async function savePushSubscription(sub: {
+  endpoint: string;
+  keys: { p256dh: string; auth: string };
+}): Promise<void> {
+  const sheets = getSheets();
+  const spreadsheetId = SHEET_ID();
+  const tab = PUSH_SUBS_TAB();
+
+  await ensurePushSubsSheet();
+
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId,
+    range: `${tab}!A2:A`,
+  });
+  const rows = res.data.values || [];
+
+  // Deduplicate by endpoint
+  for (let i = 0; i < rows.length; i++) {
+    if (rows[i][0] === sub.endpoint) return;
+  }
+
+  await sheets.spreadsheets.values.append({
+    spreadsheetId,
+    range: `${tab}!A:D`,
+    valueInputOption: "RAW",
+    requestBody: {
+      values: [[sub.endpoint, sub.keys.p256dh, sub.keys.auth, new Date().toISOString()]],
+    },
+  });
+}
+
+export async function removePushSubscription(endpoint: string): Promise<void> {
+  const sheets = getSheets();
+  const spreadsheetId = SHEET_ID();
+  const tab = PUSH_SUBS_TAB();
+
+  await ensurePushSubsSheet();
+
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId,
+    range: `${tab}!A2:D`,
+  });
+  const rows = res.data.values || [];
+
+  for (let i = rows.length - 1; i >= 0; i--) {
+    if (rows[i][0] === endpoint) {
+      // Rows are 1-indexed, header is row 1, data starts at row 2
+      const meta = await sheets.spreadsheets.get({ spreadsheetId });
+      const sheetObj = (meta.data.sheets || []).find(
+        (s) => s.properties?.title === tab
+      );
+      if (sheetObj?.properties?.sheetId !== undefined) {
+        await sheets.spreadsheets.batchUpdate({
+          spreadsheetId,
+          requestBody: {
+            requests: [
+              {
+                deleteDimension: {
+                  range: {
+                    sheetId: sheetObj.properties.sheetId,
+                    dimension: "ROWS",
+                    startIndex: i + 1, // 0-indexed, +1 for header
+                    endIndex: i + 2,
+                  },
+                },
+              },
+            ],
+          },
+        });
+      }
+      return;
+    }
+  }
+}
+
+export async function getAllPushSubscriptions(): Promise<PushSub[]> {
+  const sheets = getSheets();
+  const spreadsheetId = SHEET_ID();
+  const tab = PUSH_SUBS_TAB();
+
+  await ensurePushSubsSheet();
+
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId,
+    range: `${tab}!A2:D`,
+  });
+
+  return (res.data.values || []).map((row) => ({
+    endpoint: row[0] || "",
+    p256dh: row[1] || "",
+    auth: row[2] || "",
+    createdAt: row[3] || "",
+  }));
 }
 
 // ── Append to CallLogs ────────────────────────────────────────────────────────

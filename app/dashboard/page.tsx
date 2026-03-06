@@ -60,6 +60,12 @@ export default function DashboardPage() {
   const [liveCalls, setLiveCalls] = useState<LiveCall[]>([]);
   const [liveCallsOpen, setLiveCallsOpen] = useState(true);
 
+  // Push notifications
+  const [pushSupported, setPushSupported] = useState(false);
+  const [pushPermission, setPushPermission] = useState<NotificationPermission>("default");
+  const [pushSubscribed, setPushSubscribed] = useState(false);
+  const [pushBusy, setPushBusy] = useState(false);
+
   // ── Restore from localStorage ───────────────────────────────────────────────
   useEffect(() => {
     const savedAuth = localStorage.getItem("cb_auth");
@@ -74,6 +80,75 @@ export default function DashboardPage() {
       setPhoneSet(true);
     }
   }, []);
+
+  // ── Service Worker + Push Notifications ────────────────────────────────────
+  useEffect(() => {
+    if (!("serviceWorker" in navigator)) return;
+
+    navigator.serviceWorker.register("/sw.js").then(async (reg) => {
+      if (!("PushManager" in window)) return;
+      setPushSupported(true);
+      setPushPermission(Notification.permission);
+
+      const existing = await reg.pushManager.getSubscription();
+      setPushSubscribed(!!existing);
+    });
+  }, []);
+
+  async function handleEnablePush() {
+    setPushBusy(true);
+    try {
+      const permission = await Notification.requestPermission();
+      setPushPermission(permission);
+      if (permission !== "granted") { setPushBusy(false); return; }
+
+      const reg = await navigator.serviceWorker.ready;
+      const vapidKey = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY;
+      if (!vapidKey) { setPushBusy(false); return; }
+
+      let sub = await reg.pushManager.getSubscription();
+      if (!sub) {
+        sub = await reg.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: urlBase64ToUint8Array(vapidKey),
+        });
+      }
+
+      const subJson = sub.toJSON();
+      await fetch("/api/push/subscribe", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          endpoint: subJson.endpoint,
+          keys: subJson.keys,
+        }),
+      });
+      setPushSubscribed(true);
+    } catch (err) {
+      console.error("Push subscription error:", err);
+    }
+    setPushBusy(false);
+  }
+
+  async function handleDisablePush() {
+    setPushBusy(true);
+    try {
+      const reg = await navigator.serviceWorker.ready;
+      const sub = await reg.pushManager.getSubscription();
+      if (sub) {
+        await fetch("/api/push/unsubscribe", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ endpoint: sub.endpoint }),
+        });
+        await sub.unsubscribe();
+      }
+      setPushSubscribed(false);
+    } catch (err) {
+      console.error("Push unsubscribe error:", err);
+    }
+    setPushBusy(false);
+  }
 
   // ── Login handler ───────────────────────────────────────────────────────────
   function handleLogin() {
@@ -410,6 +485,34 @@ export default function DashboardPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          {pushSupported && (
+            <button
+              onClick={pushSubscribed ? handleDisablePush : handleEnablePush}
+              disabled={pushBusy || pushPermission === "denied"}
+              className={`px-3 py-1.5 text-sm rounded-lg transition disabled:opacity-50 ${
+                pushSubscribed
+                  ? "bg-green-700 hover:bg-green-600 text-white"
+                  : pushPermission === "denied"
+                    ? "bg-slate-800 text-slate-500 cursor-not-allowed"
+                    : "bg-amber-700 hover:bg-amber-600 text-white"
+              }`}
+              title={
+                pushPermission === "denied"
+                  ? "Notifications blocked in browser settings"
+                  : pushSubscribed
+                    ? "Push notifications enabled"
+                    : "Enable push notifications"
+              }
+            >
+              {pushBusy
+                ? "..."
+                : pushPermission === "denied"
+                  ? "Blocked"
+                  : pushSubscribed
+                    ? "Notifs ON"
+                    : "Notifs OFF"}
+            </button>
+          )}
           <button
             onClick={fetchLeads}
             className="px-3 py-1.5 text-sm bg-slate-700 hover:bg-slate-600 rounded-lg transition"
@@ -937,6 +1040,17 @@ function StatusBadge({ status }: { status: string }) {
       {status}
     </span>
   );
+}
+
+function urlBase64ToUint8Array(base64String: string): ArrayBuffer {
+  const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");
+  const rawData = atob(base64);
+  const outputArray = new Uint8Array(rawData.length);
+  for (let i = 0; i < rawData.length; i++) {
+    outputArray[i] = rawData.charCodeAt(i);
+  }
+  return outputArray.buffer as ArrayBuffer;
 }
 
 function formatDate(raw: string): string {
