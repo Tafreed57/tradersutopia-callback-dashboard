@@ -24,7 +24,10 @@ import webpush from "web-push";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const VAPID_PUBLIC = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY || "";
+const VAPID_PUBLIC =
+  process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY ||
+  process.env.VAPID_PUBLIC_KEY ||
+  "";
 const VAPID_PRIVATE = process.env.VAPID_PRIVATE_KEY || "";
 const VAPID_EMAIL = process.env.VAPID_EMAIL || "mailto:admin@tradersutopia.com";
 
@@ -33,26 +36,49 @@ function callKey(c: LiveCall): string {
 }
 
 async function sendPushForNewCalls(liveCalls: LiveCall[]): Promise<void> {
-  if (!VAPID_PUBLIC || !VAPID_PRIVATE) {
-    console.log("[live-calls] Push skip: VAPID keys not set");
-    return;
-  }
-
-  const alreadyNotified = await getAlreadyNotifiedRecent();
-  const newCalls = liveCalls.filter((c) => !alreadyNotified.has(callKey(c)));
-  if (newCalls.length === 0) return;
-
-  const subs = await getAllPushSubscriptions();
-  if (subs.length === 0) {
-    console.log("[live-calls] Push skip: no subscriptions");
-    return;
-  }
-
   console.log(
-    `[live-calls] Push: ${newCalls.length} new call(s), ${subs.length} subscriber(s)`
+    `[push] enter: ${liveCalls.length} LIVE call(s), VAPID_PUB=${VAPID_PUBLIC ? "yes(" + VAPID_PUBLIC.length + ")" : "MISSING"}, VAPID_PRIV=${VAPID_PRIVATE ? "yes" : "MISSING"}`
   );
 
-  webpush.setVapidDetails(VAPID_EMAIL, VAPID_PUBLIC, VAPID_PRIVATE);
+  if (!VAPID_PUBLIC || !VAPID_PRIVATE) {
+    console.log("[push] ABORT: VAPID keys not configured");
+    return;
+  }
+
+  let alreadyNotified: Set<string>;
+  try {
+    alreadyNotified = await getAlreadyNotifiedRecent();
+  } catch (err) {
+    console.error("[push] Failed to read notified sheet:", err);
+    alreadyNotified = new Set();
+  }
+
+  const newCalls = liveCalls.filter((c) => !alreadyNotified.has(callKey(c)));
+  console.log(
+    `[push] notified=${alreadyNotified.size}, new=${newCalls.length}` +
+      (newCalls.length === 0 && liveCalls.length > 0
+        ? ` (all ${liveCalls.length} already notified)`
+        : "")
+  );
+  if (newCalls.length === 0) return;
+
+  let subs;
+  try {
+    subs = await getAllPushSubscriptions();
+  } catch (err) {
+    console.error("[push] Failed to read subscriptions:", err);
+    return;
+  }
+
+  console.log(`[push] ${subs.length} subscriber(s)`);
+  if (subs.length === 0) return;
+
+  try {
+    webpush.setVapidDetails(VAPID_EMAIL, VAPID_PUBLIC, VAPID_PRIVATE);
+  } catch (err) {
+    console.error("[push] VAPID config error:", err);
+    return;
+  }
 
   for (const call of newCalls) {
     const ts = call.startTime ? new Date(call.startTime) : new Date();
@@ -69,9 +95,11 @@ async function sendPushForNewCalls(liveCalls: LiveCall[]): Promise<void> {
       tag: "tu-call-" + call.conferenceName.slice(-8),
     });
 
+    console.log(`[push] Sending for agent=${call.agentNumber} conf=${call.conferenceName}`);
+
     let sent = 0;
-    await Promise.allSettled(
-      subs.map(async (sub) => {
+    const results = await Promise.allSettled(
+      subs.map(async (sub, idx) => {
         try {
           await webpush.sendNotification(
             {
@@ -81,20 +109,32 @@ async function sendPushForNewCalls(liveCalls: LiveCall[]): Promise<void> {
             payload
           );
           sent++;
+          return { idx, ok: true };
         } catch (err: unknown) {
           const code =
             err && typeof err === "object" && "statusCode" in err
               ? (err as { statusCode: number }).statusCode
               : 0;
+          const msg =
+            err instanceof Error ? err.message : String(err);
           if (code === 410 || code === 404) {
+            console.log(`[push] Sub #${idx} expired (${code}), removing`);
             await removePushSubscription(sub.endpoint).catch(() => {});
+          } else {
+            console.error(`[push] Sub #${idx} failed: code=${code} ${msg}`);
           }
-          console.error("[live-calls] Push send failed for one sub:", code, err);
+          return { idx, ok: false, code, msg };
         }
       })
     );
 
-    console.log(`[live-calls] Push sent for ${call.agentNumber}: ${sent}/${subs.length}`);
+    const failures = results.filter(
+      (r) => r.status === "fulfilled" && !(r.value as { ok: boolean }).ok
+    );
+    console.log(
+      `[push] Result for ${call.agentNumber}: ${sent}/${subs.length} sent` +
+        (failures.length > 0 ? `, ${failures.length} failed` : "")
+    );
     await recordPushNotified(call.agentNumber, call.conferenceName);
   }
 }
