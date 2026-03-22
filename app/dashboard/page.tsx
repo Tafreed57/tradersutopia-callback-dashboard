@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
+import DashboardShell from "@/app/components/DashboardShell";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 interface Lead {
@@ -26,17 +27,32 @@ interface LiveCall {
   endTime: string;
 }
 
+interface Contact {
+  phone: string;
+  name: string;
+}
+
 // ── Main Page ─────────────────────────────────────────────────────────────────
 export default function DashboardPage() {
-  // Auth state
-  const [accessCode, setAccessCode] = useState("");
-  const [isAuth, setIsAuth] = useState(false);
-  const [authError, setAuthError] = useState("");
+  return (
+    <DashboardShell>
+      {(ctx) => (
+        <DashboardContent
+          affiliatePhone={ctx.affiliatePhone}
+          accessCode={ctx.accessCode}
+        />
+      )}
+    </DashboardShell>
+  );
+}
 
-  // Affiliate phone
-  const [affiliatePhone, setAffiliatePhone] = useState("");
-  const [phoneSet, setPhoneSet] = useState(false);
-
+function DashboardContent({
+  affiliatePhone,
+  accessCode,
+}: {
+  affiliatePhone: string;
+  accessCode: string;
+}) {
   // Leads
   const [leads, setLeads] = useState<Lead[]>([]);
   const [loading, setLoading] = useState(false);
@@ -46,12 +62,10 @@ export default function DashboardPage() {
 
   // Action feedback
   const [actionMsg, setActionMsg] = useState<{ id: string; msg: string; type: "ok" | "err" } | null>(null);
-  // Prevent double-clicks on Mark Called / Mark Pending (track busy lead IDs)
   const [busyLeads, setBusyLeads] = useState<Set<string>>(new Set());
-  // Track leads that have been dialed in this session (shows "Dialed" indicator)
   const [dialedLeads, setDialedLeads] = useState<Set<string>>(new Set());
 
-  // Manual dial (keypad)
+  // Manual dial
   const [manualNumber, setManualNumber] = useState("");
   const [manualMsg, setManualMsg] = useState<{ msg: string; type: "ok" | "err" } | null>(null);
   const [manualDialing, setManualDialing] = useState(false);
@@ -60,28 +74,20 @@ export default function DashboardPage() {
   const [liveCalls, setLiveCalls] = useState<LiveCall[]>([]);
   const [liveCallsOpen, setLiveCallsOpen] = useState(true);
 
+  // Contacts
+  const [contacts, setContacts] = useState<Map<string, string>>(new Map());
+
   // Push notifications
   const [pushSupported, setPushSupported] = useState(false);
   const [pushPermission, setPushPermission] = useState<NotificationPermission>("default");
   const [pushSubscribed, setPushSubscribed] = useState(false);
   const [pushBusy, setPushBusy] = useState(false);
 
-  // ── Restore from localStorage ───────────────────────────────────────────────
-  useEffect(() => {
-    const savedAuth = localStorage.getItem("cb_auth");
-    const savedCode = localStorage.getItem("cb_code");
-    const savedPhone = localStorage.getItem("cb_phone");
-    if (savedAuth === "true" && savedCode) {
-      setAccessCode(savedCode);
-      setIsAuth(true);
-    }
-    if (savedPhone) {
-      setAffiliatePhone(savedPhone);
-      setPhoneSet(true);
-    }
-  }, []);
+  // Receive calls toggle
+  const [receivingCalls, setReceivingCalls] = useState(true);
+  const [toggleBusy, setToggleBusy] = useState(false);
 
-  // ── Service Worker + Push Notifications ────────────────────────────────────
+  // ── Service Worker + Push ──────────────────────────────────────────────────
   useEffect(() => {
     if (!("serviceWorker" in navigator)) return;
 
@@ -150,40 +156,71 @@ export default function DashboardPage() {
     setPushBusy(false);
   }
 
-  // ── Login handler ───────────────────────────────────────────────────────────
-  function handleLogin() {
-    if (!accessCode.trim()) {
-      setAuthError("Enter the access code.");
-      return;
+  // ── Fetch availability on load ─────────────────────────────────────────────
+  useEffect(() => {
+    async function fetchAvailability() {
+      try {
+        const res = await fetch(`/api/agent-availability?agent=${encodeURIComponent(affiliatePhone)}&t=${Date.now()}`, {
+          cache: "no-store",
+        });
+        const data = await res.json();
+        if (data.ok) setReceivingCalls(data.available);
+      } catch {
+        // default to available
+      }
     }
-    // We store the code and validate server-side on every action
-    localStorage.setItem("cb_auth", "true");
-    localStorage.setItem("cb_code", accessCode.trim());
-    setIsAuth(true);
-    setAuthError("");
-  }
+    fetchAvailability();
+  }, [affiliatePhone]);
 
-  function handleLogout() {
-    localStorage.removeItem("cb_auth");
-    localStorage.removeItem("cb_code");
-    setIsAuth(false);
-    setAccessCode("");
-  }
-
-  // ── Phone handler ───────────────────────────────────────────────────────────
-  function handleSetPhone() {
-    const cleaned = affiliatePhone.trim();
-    if (!cleaned.startsWith("+") || cleaned.length < 8) {
-      alert("Phone must be E.164 format, e.g. +14375053539");
-      return;
+  async function handleToggleReceiving() {
+    setToggleBusy(true);
+    const newValue = !receivingCalls;
+    try {
+      const res = await fetch("/api/agent-availability", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          agent: affiliatePhone,
+          available: newValue,
+          accessCode,
+        }),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        setReceivingCalls(newValue);
+      }
+    } catch (err) {
+      console.error("Toggle error:", err);
     }
-    localStorage.setItem("cb_phone", cleaned);
-    setAffiliatePhone(cleaned);
-    setPhoneSet(true);
+    setToggleBusy(false);
   }
 
-  function handleChangePhone() {
-    setPhoneSet(false);
+  // ── Contacts ───────────────────────────────────────────────────────────────
+  const fetchContacts = useCallback(async () => {
+    try {
+      const res = await fetch("/api/contacts?t=" + Date.now(), { cache: "no-store" });
+      const data = await res.json();
+      if (data.ok) {
+        const map = new Map<string, string>();
+        for (const c of data.contacts as Contact[]) {
+          const digits = c.phone.replace(/[^0-9]/g, "");
+          map.set(digits, c.name);
+        }
+        setContacts(map);
+      }
+    } catch {
+      // non-fatal
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchContacts();
+  }, [fetchContacts]);
+
+  function lookupName(phone: string): string | null {
+    if (!phone) return null;
+    const digits = phone.replace(/[^0-9]/g, "");
+    return contacts.get(digits) || null;
   }
 
   // ── Fetch leads ─────────────────────────────────────────────────────────────
@@ -209,15 +246,13 @@ export default function DashboardPage() {
   }, [statusFilter, search, sortOrder]);
 
   useEffect(() => {
-    if (isAuth && phoneSet) fetchLeads();
-  }, [isAuth, phoneSet, fetchLeads]);
+    fetchLeads();
+  }, [fetchLeads]);
 
-  // Auto-refresh every 30s (Google Sheets API has a 60 reads/min quota)
   useEffect(() => {
-    if (!isAuth || !phoneSet) return;
     const interval = setInterval(fetchLeads, 30000);
     return () => clearInterval(interval);
-  }, [isAuth, phoneSet, fetchLeads]);
+  }, [fetchLeads]);
 
   // ── Live Calls ─────────────────────────────────────────────────────────────
   const fetchLiveCalls = useCallback(async () => {
@@ -233,14 +268,13 @@ export default function DashboardPage() {
   }, []);
 
   useEffect(() => {
-    if (isAuth && phoneSet) fetchLiveCalls();
-  }, [isAuth, phoneSet, fetchLiveCalls]);
+    fetchLiveCalls();
+  }, [fetchLiveCalls]);
 
   useEffect(() => {
-    if (!isAuth || !phoneSet) return;
     const interval = setInterval(fetchLiveCalls, 5000);
     return () => clearInterval(interval);
-  }, [isAuth, phoneSet, fetchLiveCalls]);
+  }, [fetchLiveCalls]);
 
   // ── Actions ─────────────────────────────────────────────────────────────────
   async function handleCall(lead: Lead) {
@@ -254,7 +288,7 @@ export default function DashboardPage() {
         body: JSON.stringify({
           leadId: lead.id,
           affiliatePhone,
-          accessCode: localStorage.getItem("cb_code"),
+          accessCode,
         }),
       });
       const data = await res.json();
@@ -271,11 +305,9 @@ export default function DashboardPage() {
   }
 
   async function handleMarkStatus(lead: Lead, newStatus: string) {
-    // Prevent double-clicks
     if (busyLeads.has(lead.id)) return;
     setBusyLeads((prev) => new Set(prev).add(lead.id));
 
-    // ── Optimistic update: immediately update local state ──
     const previousLeads = [...leads];
     setLeads((prev) =>
       prev.map((l) => (l.id === lead.id ? { ...l, status: newStatus } : l))
@@ -287,22 +319,19 @@ export default function DashboardPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           status: newStatus,
-          accessCode: localStorage.getItem("cb_code"),
+          accessCode,
           affiliatePhone,
         }),
       });
       const data = await res.json();
       if (data.ok) {
-        // Re-fetch from Sheets to confirm sync
         fetchLeads();
         setActionMsg({ id: lead.id, msg: `Marked ${newStatus}`, type: "ok" });
       } else {
-        // Revert optimistic update on failure
         setLeads(previousLeads);
         setActionMsg({ id: lead.id, msg: data.error, type: "err" });
       }
     } catch {
-      // Revert optimistic update on network error
       setLeads(previousLeads);
       setActionMsg({ id: lead.id, msg: "Network error", type: "err" });
     }
@@ -311,7 +340,6 @@ export default function DashboardPage() {
   }
 
   async function handleSaveNotes(lead: Lead, notes: string) {
-    // Optimistic update
     setLeads((prev) =>
       prev.map((l) => (l.id === lead.id ? { ...l, notes } : l))
     );
@@ -322,7 +350,7 @@ export default function DashboardPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           notes,
-          accessCode: localStorage.getItem("cb_code"),
+          accessCode,
           affiliatePhone,
         }),
       });
@@ -332,16 +360,30 @@ export default function DashboardPage() {
         fetchLeads();
       } else {
         setActionMsg({ id: lead.id, msg: data.error, type: "err" });
-        fetchLeads(); // Re-fetch to revert
+        fetchLeads();
       }
     } catch {
       setActionMsg({ id: lead.id, msg: "Network error", type: "err" });
-      fetchLeads(); // Re-fetch to revert
+      fetchLeads();
     }
     setTimeout(() => setActionMsg(null), 3000);
   }
 
-  // ── Client-side emergency check (mirrors server block list) ─────────────────
+  // ── Contact name saving ────────────────────────────────────────────────────
+  async function handleSaveContactName(phone: string, name: string) {
+    try {
+      await fetch("/api/contacts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ phone, name, accessCode }),
+      });
+      fetchContacts();
+    } catch (err) {
+      console.error("Save contact error:", err);
+    }
+  }
+
+  // ── Emergency check ────────────────────────────────────────────────────────
   function isEmergencyClient(phone: string): boolean {
     const digits = phone.replace(/\D/g, "");
     const blocked = new Set([
@@ -355,7 +397,6 @@ export default function DashboardPage() {
     return false;
   }
 
-  // Normalize a phone number: 10 digits → +1XXXXXXXXXX, 11 starting with 1 → +1XXXXXXXXXX
   function normalizePhone(input: string): string {
     let val = input.trim();
     if (val.startsWith("+")) return val;
@@ -387,7 +428,7 @@ export default function DashboardPage() {
         body: JSON.stringify({
           affiliatePhone,
           leadPhone: withPlus,
-          accessCode: localStorage.getItem("cb_code"),
+          accessCode,
         }),
       });
       const data = await res.json();
@@ -404,129 +445,65 @@ export default function DashboardPage() {
     setTimeout(() => setManualMsg(null), 5000);
   }
 
-  // ── LOGIN SCREEN ────────────────────────────────────────────────────────────
-  if (!isAuth) {
-    return (
-      <div className="min-h-screen bg-slate-950 flex items-center justify-center p-4">
-        <div className="bg-slate-900 border border-slate-700 rounded-xl p-8 w-full max-w-sm shadow-2xl">
-          <h1 className="text-xl font-bold text-white mb-1">Callback Dashboard</h1>
-          <p className="text-slate-400 text-sm mb-6">Enter your access code to continue.</p>
-          <input
-            type="password"
-            value={accessCode}
-            onChange={(e) => setAccessCode(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && handleLogin()}
-            placeholder="Access code"
-            className="w-full px-4 py-3 bg-slate-800 border border-slate-600 rounded-lg text-white placeholder-slate-500 mb-3 focus:outline-none focus:border-blue-500"
-          />
-          {authError && <p className="text-red-400 text-sm mb-3">{authError}</p>}
-          <button
-            onClick={handleLogin}
-            className="w-full py-3 bg-blue-600 hover:bg-blue-500 text-white font-semibold rounded-lg transition"
-          >
-            Log In
-          </button>
-        </div>
-      </div>
-    );
-  }
-
-  // ── PHONE INPUT SCREEN ──────────────────────────────────────────────────────
-  if (!phoneSet) {
-    return (
-      <div className="min-h-screen bg-slate-950 flex items-center justify-center p-4">
-        <div className="bg-slate-900 border border-slate-700 rounded-xl p-8 w-full max-w-sm shadow-2xl">
-          <h1 className="text-xl font-bold text-white mb-1">Your Phone Number</h1>
-          <p className="text-slate-400 text-sm mb-6">
-            When you click &quot;Call&quot;, we call YOUR phone first, then bridge to the lead.
-          </p>
-          <input
-            type="tel"
-            value={affiliatePhone}
-            onChange={(e) => setAffiliatePhone(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && handleSetPhone()}
-            placeholder="+14375053539"
-            className="w-full px-4 py-3 bg-slate-800 border border-slate-600 rounded-lg text-white placeholder-slate-500 mb-2 focus:outline-none focus:border-blue-500"
-          />
-          <p className="text-slate-500 text-xs mb-4">E.164 format: + country code + number</p>
-          <button
-            onClick={handleSetPhone}
-            className="w-full py-3 bg-green-600 hover:bg-green-500 text-white font-semibold rounded-lg transition"
-          >
-            Continue
-          </button>
-          <button
-            onClick={handleLogout}
-            className="w-full mt-2 py-2 text-slate-400 hover:text-white text-sm transition"
-          >
-            Log out
-          </button>
-        </div>
-      </div>
-    );
-  }
-
-  // Normalized manual number for emergency check
   const manualNormalized = manualNumber.trim() ? normalizePhone(manualNumber.trim()) : "";
   const isManualEmergency = manualNormalized.length >= 3 && isEmergencyClient(manualNormalized);
 
-  // ── MAIN DASHBOARD ──────────────────────────────────────────────────────────
+  // ── RENDER ──────────────────────────────────────────────────────────────────
   return (
-    <div className="min-h-screen bg-slate-950 text-white">
-      {/* Header */}
-      <header className="bg-slate-900 border-b border-slate-700 px-4 py-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
-        <div>
-          <h1 className="text-lg font-bold">Callback Dashboard</h1>
-          <p className="text-slate-400 text-xs">
-            Your phone: <span className="text-white">{affiliatePhone}</span>
-            <button onClick={handleChangePhone} className="ml-2 text-blue-400 hover:text-blue-300 underline">
-              change
-            </button>
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          {pushSupported && (
-            <button
-              onClick={pushSubscribed ? handleDisablePush : handleEnablePush}
-              disabled={pushBusy || pushPermission === "denied"}
-              className={`px-3 py-1.5 text-sm rounded-lg transition disabled:opacity-50 ${
-                pushSubscribed
-                  ? "bg-green-700 hover:bg-green-600 text-white"
-                  : pushPermission === "denied"
-                    ? "bg-slate-800 text-slate-500 cursor-not-allowed"
-                    : "bg-amber-700 hover:bg-amber-600 text-white"
-              }`}
-              title={
-                pushPermission === "denied"
-                  ? "Notifications blocked in browser settings"
-                  : pushSubscribed
-                    ? "Push notifications enabled"
-                    : "Enable push notifications"
-              }
-            >
-              {pushBusy
-                ? "..."
+    <div>
+      {/* Sub-header: toggle + push + refresh */}
+      <div className="bg-slate-900/50 border-b border-slate-800 px-4 py-2 flex flex-wrap items-center gap-3">
+        {/* Receive Calls Toggle */}
+        <button
+          onClick={handleToggleReceiving}
+          disabled={toggleBusy}
+          className={`flex items-center gap-2 px-3 py-1.5 text-sm rounded-lg transition disabled:opacity-50 ${
+            receivingCalls
+              ? "bg-green-700 hover:bg-green-600 text-white"
+              : "bg-red-900 hover:bg-red-800 text-red-200"
+          }`}
+        >
+          <span className={`inline-block w-2 h-2 rounded-full ${receivingCalls ? "bg-green-300" : "bg-red-400"}`} />
+          {toggleBusy ? "..." : receivingCalls ? "Receiving Calls" : "Calls OFF"}
+        </button>
+
+        {/* Push */}
+        {pushSupported && (
+          <button
+            onClick={pushSubscribed ? handleDisablePush : handleEnablePush}
+            disabled={pushBusy || pushPermission === "denied"}
+            className={`px-3 py-1.5 text-sm rounded-lg transition disabled:opacity-50 ${
+              pushSubscribed
+                ? "bg-green-700 hover:bg-green-600 text-white"
                 : pushPermission === "denied"
-                  ? "Blocked"
-                  : pushSubscribed
-                    ? "Notifs ON"
-                    : "Notifs OFF"}
-            </button>
-          )}
-          <button
-            onClick={fetchLeads}
-            className="px-3 py-1.5 text-sm bg-slate-700 hover:bg-slate-600 rounded-lg transition"
+                  ? "bg-slate-800 text-slate-500 cursor-not-allowed"
+                  : "bg-amber-700 hover:bg-amber-600 text-white"
+            }`}
+            title={
+              pushPermission === "denied"
+                ? "Notifications blocked in browser settings"
+                : pushSubscribed
+                  ? "Push notifications enabled"
+                  : "Enable push notifications"
+            }
           >
-            Refresh
+            {pushBusy
+              ? "..."
+              : pushPermission === "denied"
+                ? "Blocked"
+                : pushSubscribed
+                  ? "Notifs ON"
+                  : "Notifs OFF"}
           </button>
-          <button
-            onClick={handleLogout}
-            className="px-3 py-1.5 text-sm text-slate-400 hover:text-white border border-slate-600 rounded-lg transition"
-          >
-            Log out
-          </button>
-        </div>
-      </header>
+        )}
+
+        <button
+          onClick={fetchLeads}
+          className="px-3 py-1.5 text-sm bg-slate-700 hover:bg-slate-600 rounded-lg transition ml-auto"
+        >
+          Refresh
+        </button>
+      </div>
 
       {/* Manual dial (keypad) */}
       <div className="px-4 py-3 border-b border-slate-800 bg-slate-900/50">
@@ -545,17 +522,16 @@ export default function DashboardPage() {
             disabled={manualDialing || isManualEmergency}
             className="px-4 py-2.5 bg-green-600 hover:bg-green-500 disabled:bg-slate-600 disabled:cursor-not-allowed text-white font-semibold rounded-lg transition shrink-0"
           >
-            {manualDialing ? "Dialing…" : "Dial"}
+            {manualDialing ? "Dialing\u2026" : "Dial"}
           </button>
         </div>
-        {/* On-screen keypad */}
         <div className="grid grid-cols-3 gap-2 max-w-[240px]">
-          {["1", "2", "3", "4", "5", "6", "7", "8", "9", "+", "0", "⌫"].map((key) => (
+          {["1", "2", "3", "4", "5", "6", "7", "8", "9", "+", "0", "\u232B"].map((key) => (
             <button
               key={key}
               type="button"
               onClick={() => {
-                if (key === "⌫") {
+                if (key === "\u232B") {
                   setManualNumber((n) => n.slice(0, -1));
                 } else {
                   setManualNumber((n) => n + key);
@@ -600,12 +576,10 @@ export default function DashboardPage() {
             </span>
           )}
           <span className="text-slate-500 text-xs">
-            {liveCalls.length > 0
-              ? `${liveCalls.length} active`
-              : "None"}
+            {liveCalls.length > 0 ? `${liveCalls.length} active` : "None"}
           </span>
           <span className="text-slate-500 text-xs ml-auto">
-            {liveCallsOpen ? "▲" : "▼"}
+            {liveCallsOpen ? "\u25B2" : "\u25BC"}
           </span>
         </button>
 
@@ -624,38 +598,53 @@ export default function DashboardPage() {
                     if (!grouped.has(key)) grouped.set(key, []);
                     grouped.get(key)!.push(c);
                   }
-                  return Array.from(grouped.entries()).map(([conf, agents]) => (
-                    <div
-                      key={conf}
-                      className="bg-green-950/40 border border-green-800/50 rounded-lg p-3"
-                    >
-                      <div className="flex items-center gap-2 mb-2">
-                        <span className="relative flex h-2 w-2">
-                          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75" />
-                          <span className="relative inline-flex rounded-full h-2 w-2 bg-green-500" />
-                        </span>
-                        <span className="text-green-300 text-xs font-mono truncate">
-                          {conf}
-                        </span>
-                        <span className="text-green-500/60 text-xs ml-auto">
-                          Caller: {agents[0]?.callerNumber || "—"}
-                        </span>
+                  return Array.from(grouped.entries()).map(([conf, agents]) => {
+                    const callerNum = agents[0]?.callerNumber || "";
+                    const callerName = lookupName(callerNum);
+                    return (
+                      <div
+                        key={conf}
+                        className="bg-green-950/40 border border-green-800/50 rounded-lg p-3"
+                      >
+                        <div className="flex items-center gap-2 mb-2">
+                          <span className="relative flex h-2 w-2">
+                            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75" />
+                            <span className="relative inline-flex rounded-full h-2 w-2 bg-green-500" />
+                          </span>
+                          <span className="text-green-300 text-xs font-mono truncate">
+                            {conf}
+                          </span>
+                          <span className="text-green-500/60 text-xs ml-auto flex items-center gap-1">
+                            Caller:{" "}
+                            {callerName ? (
+                              <span>
+                                <span className="text-green-300">{callerName}</span>
+                                <span className="text-green-600 ml-1">({callerNum})</span>
+                              </span>
+                            ) : (
+                              <CallerWithEdit
+                                phone={callerNum}
+                                onSave={handleSaveContactName}
+                              />
+                            )}
+                          </span>
+                        </div>
+                        <div className="flex flex-wrap gap-3">
+                          {agents.map((agent) => (
+                            <div
+                              key={agent.agentNumber + agent.conferenceName}
+                              className="flex items-center gap-2"
+                            >
+                              <span className="text-white text-sm font-mono">
+                                {agent.agentNumber}
+                              </span>
+                              <LiveDuration startTime={agent.startTime} />
+                            </div>
+                          ))}
+                        </div>
                       </div>
-                      <div className="flex flex-wrap gap-3">
-                        {agents.map((agent) => (
-                          <div
-                            key={agent.agentNumber + agent.conferenceName}
-                            className="flex items-center gap-2"
-                          >
-                            <span className="text-white text-sm font-mono">
-                              {agent.agentNumber}
-                            </span>
-                            <LiveDuration startTime={agent.startTime} />
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  ));
+                    );
+                  });
                 })()}
               </div>
             )}
@@ -665,7 +654,6 @@ export default function DashboardPage() {
 
       {/* Filters */}
       <div className="px-4 py-3 flex flex-col sm:flex-row gap-3 border-b border-slate-800">
-        {/* Status tabs */}
         <div className="flex gap-1">
           {["pending", "called", "all"].map((s) => (
             <button
@@ -682,7 +670,6 @@ export default function DashboardPage() {
           ))}
         </div>
 
-        {/* Search */}
         <input
           type="text"
           value={search}
@@ -691,7 +678,6 @@ export default function DashboardPage() {
           className="flex-1 px-3 py-1.5 text-sm bg-slate-800 border border-slate-700 rounded-lg text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
         />
 
-        {/* Sort */}
         <button
           onClick={() => setSortOrder(sortOrder === "desc" ? "asc" : "desc")}
           className="px-3 py-1.5 text-sm bg-slate-800 text-slate-400 hover:text-white rounded-lg transition"
@@ -762,6 +748,66 @@ export default function DashboardPage() {
         </div>
       </main>
     </div>
+  );
+}
+
+// ── Caller with inline edit (for Live Calls contacts) ────────────────────────
+function CallerWithEdit({
+  phone,
+  onSave,
+}: {
+  phone: string;
+  onSave: (phone: string, name: string) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [name, setName] = useState("");
+
+  if (!phone) return <span>—</span>;
+
+  if (editing) {
+    return (
+      <span className="inline-flex gap-1 items-center">
+        <input
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && name.trim()) {
+              onSave(phone, name.trim());
+              setEditing(false);
+            }
+            if (e.key === "Escape") setEditing(false);
+          }}
+          placeholder="Name..."
+          autoFocus
+          className="px-1.5 py-0.5 text-xs bg-slate-800 border border-slate-600 rounded text-white w-24 focus:outline-none"
+        />
+        <button
+          onClick={() => { if (name.trim()) { onSave(phone, name.trim()); setEditing(false); } }}
+          className="text-xs text-green-400 hover:text-green-300"
+        >
+          Save
+        </button>
+        <button
+          onClick={() => setEditing(false)}
+          className="text-xs text-slate-500 hover:text-slate-300"
+        >
+          Cancel
+        </button>
+      </span>
+    );
+  }
+
+  return (
+    <span className="inline-flex items-center gap-1">
+      <span>{phone}</span>
+      <button
+        onClick={() => setEditing(true)}
+        className="text-green-500 hover:text-green-300 text-xs"
+        title="Add name for this caller"
+      >
+        +name
+      </button>
+    </span>
   );
 }
 
@@ -857,7 +903,7 @@ function LeadRow({
                   : "bg-slate-700 hover:bg-slate-600"
               }`}
             >
-              {busy ? "Updating…" : "Mark Called"}
+              {busy ? "Updating\u2026" : "Mark Called"}
             </button>
           ) : (
             <button
@@ -865,7 +911,7 @@ function LeadRow({
               disabled={busy}
               className="px-2 py-1 text-xs bg-slate-700 hover:bg-slate-600 rounded transition disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              {busy ? "Updating…" : "Mark Pending"}
+              {busy ? "Updating\u2026" : "Mark Pending"}
             </button>
           )}
         </div>
@@ -925,10 +971,9 @@ function LeadCard({
 
       <p className="text-slate-500 text-xs mb-3">
         {formatDate(lead.createdAt)}
-        {lead.calledAt && ` • Called ${formatDate(lead.calledAt)}`}
+        {lead.calledAt && ` \u2022 Called ${formatDate(lead.calledAt)}`}
       </p>
 
-      {/* Notes */}
       <div className="mb-3">
         {editing ? (
           <div className="flex gap-2">
@@ -961,7 +1006,6 @@ function LeadCard({
         )}
       </div>
 
-      {/* Action buttons */}
       <div className="flex gap-2">
         <button
           onClick={() => onCall(lead)}
@@ -981,7 +1025,7 @@ function LeadCard({
                 : "bg-slate-700 hover:bg-slate-600"
             }`}
           >
-            {busy ? "Updating…" : "Mark Called"}
+            {busy ? "Updating\u2026" : "Mark Called"}
           </button>
         ) : (
           <button
@@ -989,7 +1033,7 @@ function LeadCard({
             disabled={busy}
             className="py-2.5 px-4 bg-slate-700 hover:bg-slate-600 rounded-lg text-sm transition disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            {busy ? "Updating…" : "Mark Pending"}
+            {busy ? "Updating\u2026" : "Mark Pending"}
           </button>
         )}
       </div>
@@ -1057,7 +1101,6 @@ function formatDate(raw: string): string {
   if (!raw) return "—";
   try {
     let d: Date;
-    // Handle DD/MM/YYYY HH:MM:SS format from Google Sheets
     const ddmmMatch = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2}):(\d{2}):?(\d{2})?/);
     if (ddmmMatch) {
       const [, day, month, year, hour, min, sec] = ddmmMatch;

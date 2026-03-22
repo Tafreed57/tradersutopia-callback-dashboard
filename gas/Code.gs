@@ -14,10 +14,6 @@ const SPREADSHEET_ID = "1LI71rRtGbdPQ8wgSD-QIobDvOc5Yro0lTYgW3_eMDKs";
 const SHEET_NAME = "Callback Queue";
 const LIVE_CALLS_TAB = "Live Calls";
 
-const VERCEL_PUSH_URL = "https://tradersutopia-callback-dashboard.vercel.app/api/push/send";
-const PUSH_SEND_SECRET = "tu-push-secret-2026";
-
-
 const LIVE_CALLS_HEADERS = [
   "Agent Number",
   "Conference Name",
@@ -182,24 +178,8 @@ function handleAgentOnCall(ss, data) {
     lock.releaseLock();
   }
 
-  // Trigger push notification via Vercel (fire after sheet write, outside lock)
-  try {
-    UrlFetchApp.fetch(VERCEL_PUSH_URL, {
-      method: "post",
-      contentType: "application/json",
-      headers: { "x-push-secret": PUSH_SEND_SECRET },
-      payload: JSON.stringify({
-        agent: data.agent || "",
-        caller_number: data.caller_number || "",
-        conference_name: data.conference_name || "",
-        timestamp: data.timestamp || new Date().toISOString()
-      }),
-      muteHttpExceptions: true
-    });
-    Logger.log("Push trigger sent for agent " + data.agent);
-  } catch (pushErr) {
-    Logger.log("Push trigger failed (non-fatal): " + pushErr);
-  }
+  // Push notification is now triggered directly from agent_whisper.js
+  // (Twilio Function) for sub-second delivery. No GAS → Vercel round-trip needed.
 }
 
 /**

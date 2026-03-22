@@ -7,6 +7,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { startBridgeCall, isE164 } from "@/lib/twilio";
 import { isEmergencyNumber } from "@/lib/emergency";
+import { appendLog, ensureSheetsReady } from "@/lib/sheets";
+import { v4 as uuidv4 } from "uuid";
 
 export const runtime = "nodejs";
 
@@ -89,6 +91,24 @@ export async function POST(req: NextRequest) {
     });
 
     console.log(`[dial-number] Manual dial: ${affiliatePhone} → ${normalizedLead}`);
+
+    try {
+      await ensureSheetsReady();
+      await appendLog({
+        logId: uuidv4(),
+        action: "OUTBOUND_MANUAL_DIAL",
+        leadId: "manual",
+        affiliatePhone,
+        details: JSON.stringify({
+          direction: "outbound",
+          callerNumber: normalizedLead,
+        }),
+        twilioCallSid: callSid,
+      });
+    } catch (logErr) {
+      console.error("[dial-number] Log error (non-fatal):", logErr);
+    }
+
     return NextResponse.json({ ok: true, callSid });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : "Unknown error";

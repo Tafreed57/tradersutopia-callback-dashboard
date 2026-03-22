@@ -93,13 +93,17 @@ export async function POST(req: NextRequest) {
 
     console.log(`[start-call] Call created: ${callSid}`);
 
-    // Log the call attempt (but do NOT change status — agent must manually "Mark Called")
     await appendLog({
       logId: uuidv4(),
-      action: "CALL_DIALED",
+      action: "OUTBOUND_CALL_DIALED",
       leadId: lead.id,
       affiliatePhone,
-      details: JSON.stringify({ leadName: lead.name, leadPhone: lead.phone }),
+      details: JSON.stringify({
+        direction: "outbound",
+        leadName: lead.name,
+        leadPhone: lead.phone,
+        callerNumber: lead.phone,
+      }),
       twilioCallSid: callSid,
     });
 

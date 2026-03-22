@@ -47,6 +47,10 @@ service-account.json
 *service*account*.json
 tradersutopia-callbacks*.json
 
+# Reference / legacy folders (deployed separately, not part of Vercel build)
+tradersutopia inboundcall workflow/
+callback-dashboard/
+
 # Vercel
 .vercel
 .vercel/

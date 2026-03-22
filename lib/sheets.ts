@@ -37,6 +37,10 @@ const PUSH_SUBS_TAB = () =>
   process.env.GOOGLE_SHEET_PUSH_SUBS_TAB || "Push Subscriptions";
 const PUSH_NOTIFIED_TAB = () =>
   process.env.GOOGLE_SHEET_PUSH_NOTIFIED_TAB || "Push Notified";
+const AVAILABILITY_TAB = () =>
+  process.env.GOOGLE_SHEET_AVAILABILITY_TAB || "Agent Availability";
+const CONTACTS_TAB = () =>
+  process.env.GOOGLE_SHEET_CONTACTS_TAB || "Contacts";
 
 // "Callback Queue" tab uses different columns; we map them to our Lead shape
 const IS_QUEUE_LAYOUT = () =>
@@ -654,6 +658,325 @@ export async function recordPushNotified(
       values: [[agentNumber, conferenceName, new Date().toISOString()]],
     },
   });
+}
+
+// ── Agent Availability ────────────────────────────────────────────────────────
+
+const AVAILABILITY_HEADERS = ["agent_number", "available", "updated_at"];
+
+async function ensureAvailabilitySheet() {
+  const sheets = getSheets();
+  const spreadsheetId = SHEET_ID();
+  const tab = AVAILABILITY_TAB();
+
+  const meta = await sheets.spreadsheets.get({ spreadsheetId });
+  const existingTabs = (meta.data.sheets || []).map(
+    (s) => s.properties?.title
+  );
+
+  if (!existingTabs.includes(tab)) {
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId,
+      requestBody: {
+        requests: [{ addSheet: { properties: { title: tab } } }],
+      },
+    });
+    await ensureHeaders(sheets, spreadsheetId, tab, AVAILABILITY_HEADERS);
+  }
+}
+
+export async function getAgentAvailability(
+  agentNumber: string
+): Promise<boolean> {
+  const sheets = getSheets();
+  const spreadsheetId = SHEET_ID();
+  const tab = AVAILABILITY_TAB();
+
+  await ensureAvailabilitySheet();
+
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId,
+    range: `${tab}!A2:B`,
+  });
+  const rows = res.data.values || [];
+  const normalize = (n: string) => n.replace(/[^0-9]/g, "");
+  const target = normalize(agentNumber);
+
+  for (const row of rows) {
+    if (normalize(row[0] || "") === target) {
+      return (row[1] || "").toUpperCase() !== "FALSE";
+    }
+  }
+  return true; // default: available
+}
+
+export async function setAgentAvailability(
+  agentNumber: string,
+  available: boolean
+): Promise<void> {
+  const sheets = getSheets();
+  const spreadsheetId = SHEET_ID();
+  const tab = AVAILABILITY_TAB();
+
+  await ensureAvailabilitySheet();
+
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId,
+    range: `${tab}!A2:C`,
+  });
+  const rows = res.data.values || [];
+  const normalize = (n: string) => n.replace(/[^0-9]/g, "");
+  const target = normalize(agentNumber);
+
+  for (let i = 0; i < rows.length; i++) {
+    if (normalize(rows[i][0] || "") === target) {
+      const rowNum = i + 2;
+      await sheets.spreadsheets.values.update({
+        spreadsheetId,
+        range: `${tab}!B${rowNum}:C${rowNum}`,
+        valueInputOption: "RAW",
+        requestBody: {
+          values: [[String(available).toUpperCase(), new Date().toISOString()]],
+        },
+      });
+      return;
+    }
+  }
+
+  await sheets.spreadsheets.values.append({
+    spreadsheetId,
+    range: `${tab}!A:C`,
+    valueInputOption: "RAW",
+    requestBody: {
+      values: [
+        [agentNumber, String(available).toUpperCase(), new Date().toISOString()],
+      ],
+    },
+  });
+}
+
+/**
+ * Returns the set of agent numbers explicitly marked unavailable.
+ * Agents NOT in this set are considered available (default-available design).
+ */
+export async function getUnavailableAgents(): Promise<Set<string>> {
+  const sheets = getSheets();
+  const spreadsheetId = SHEET_ID();
+  const tab = AVAILABILITY_TAB();
+
+  await ensureAvailabilitySheet();
+
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId,
+    range: `${tab}!A2:B`,
+  });
+  const rows = res.data.values || [];
+  const unavailable = new Set<string>();
+
+  for (const row of rows) {
+    if ((row[1] || "").toUpperCase() === "FALSE") {
+      unavailable.add((row[0] || "").replace(/[^0-9]/g, ""));
+    }
+  }
+
+  return unavailable;
+}
+
+// ── Contacts ──────────────────────────────────────────────────────────────────
+
+const CONTACTS_HEADERS = ["phone", "name", "updated_at"];
+
+async function ensureContactsSheet() {
+  const sheets = getSheets();
+  const spreadsheetId = SHEET_ID();
+  const tab = CONTACTS_TAB();
+
+  const meta = await sheets.spreadsheets.get({ spreadsheetId });
+  const existingTabs = (meta.data.sheets || []).map(
+    (s) => s.properties?.title
+  );
+
+  if (!existingTabs.includes(tab)) {
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId,
+      requestBody: {
+        requests: [{ addSheet: { properties: { title: tab } } }],
+      },
+    });
+    await ensureHeaders(sheets, spreadsheetId, tab, CONTACTS_HEADERS);
+  }
+}
+
+export interface Contact {
+  phone: string;
+  name: string;
+  updatedAt: string;
+}
+
+export async function getAllContacts(): Promise<Contact[]> {
+  const sheets = getSheets();
+  const spreadsheetId = SHEET_ID();
+  const tab = CONTACTS_TAB();
+
+  await ensureContactsSheet();
+
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId,
+    range: `${tab}!A2:C`,
+  });
+
+  return (res.data.values || []).map((row) => ({
+    phone: row[0] || "",
+    name: row[1] || "",
+    updatedAt: row[2] || "",
+  }));
+}
+
+export async function upsertContact(
+  phone: string,
+  name: string
+): Promise<void> {
+  const sheets = getSheets();
+  const spreadsheetId = SHEET_ID();
+  const tab = CONTACTS_TAB();
+
+  await ensureContactsSheet();
+
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId,
+    range: `${tab}!A2:C`,
+  });
+  const rows = res.data.values || [];
+  const normalize = (n: string) => n.replace(/[^0-9]/g, "");
+  const target = normalize(phone);
+
+  for (let i = 0; i < rows.length; i++) {
+    if (normalize(rows[i][0] || "") === target) {
+      const rowNum = i + 2;
+      await sheets.spreadsheets.values.update({
+        spreadsheetId,
+        range: `${tab}!B${rowNum}:C${rowNum}`,
+        valueInputOption: "RAW",
+        requestBody: {
+          values: [[name, new Date().toISOString()]],
+        },
+      });
+      return;
+    }
+  }
+
+  await sheets.spreadsheets.values.append({
+    spreadsheetId,
+    range: `${tab}!A:C`,
+    valueInputOption: "RAW",
+    requestBody: {
+      values: [[phone, name, new Date().toISOString()]],
+    },
+  });
+}
+
+// ── Call History (unified view) ───────────────────────────────────────────────
+
+export interface CallHistoryEntry {
+  timestamp: string;
+  direction: "inbound" | "outbound";
+  agentNumber: string;
+  callerNumber: string;
+  status: string;
+  duration: string;
+  conferenceName: string;
+  details: string;
+}
+
+export async function getCallHistory(opts?: {
+  direction?: "inbound" | "outbound" | "all";
+  status?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<{ entries: CallHistoryEntry[]; total: number }> {
+  const sheets = getSheets();
+  const spreadsheetId = SHEET_ID();
+  const entries: CallHistoryEntry[] = [];
+
+  // Inbound calls from Live Calls tab
+  if (opts?.direction !== "outbound") {
+    try {
+      await ensureLiveCallsSheet();
+      const lcRes = await sheets.spreadsheets.values.get({
+        spreadsheetId,
+        range: `${LIVE_CALLS_TAB()}!A2:G`,
+      });
+      for (const row of lcRes.data.values || []) {
+        const rawStatus = (row[4] || "").toUpperCase();
+        entries.push({
+          timestamp: row[3] || row[6] || "",
+          direction: "inbound",
+          agentNumber: row[0] || "",
+          callerNumber: row[2] || "",
+          status: rawStatus === "LIVE" ? "active" : "completed",
+          duration: row[5] || "",
+          conferenceName: row[1] || "",
+          details: "",
+        });
+      }
+    } catch {
+      // Live Calls tab may not exist yet
+    }
+  }
+
+  // Outbound calls from CallLogs tab
+  if (opts?.direction !== "inbound") {
+    try {
+      const logRes = await sheets.spreadsheets.values.get({
+        spreadsheetId,
+        range: `${LOGS_TAB()}!A2:G`,
+      });
+      for (const row of logRes.data.values || []) {
+        const action = (row[3] || "").toLowerCase();
+        if (!action.includes("call") && !action.includes("dial")) continue;
+
+        let detailsStr = row[5] || "";
+        let leadPhone = "";
+        try {
+          const parsed = JSON.parse(detailsStr);
+          leadPhone = parsed.leadPhone || "";
+        } catch {
+          // details might not be JSON
+        }
+
+        entries.push({
+          timestamp: row[1] || "",
+          direction: "outbound",
+          agentNumber: row[4] || "",
+          callerNumber: leadPhone,
+          status: action.includes("error") || action.includes("fail") ? "failed" : "completed",
+          duration: "",
+          conferenceName: "",
+          details: detailsStr,
+        });
+      }
+    } catch {
+      // CallLogs tab may not exist yet
+    }
+  }
+
+  // Filter by status
+  let filtered = entries;
+  if (opts?.status && opts.status !== "all") {
+    filtered = filtered.filter((e) => e.status === opts.status);
+  }
+
+  // Sort by timestamp descending
+  filtered.sort((a, b) => {
+    const ta = new Date(a.timestamp).getTime() || 0;
+    const tb = new Date(b.timestamp).getTime() || 0;
+    return tb - ta;
+  });
+
+  const total = filtered.length;
+  const offset = opts?.offset || 0;
+  const limit = opts?.limit || 50;
+  return { entries: filtered.slice(offset, offset + limit), total };
 }
 
 // ── Append to CallLogs ────────────────────────────────────────────────────────
