@@ -1,5 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getAllPushSubscriptions, removePushSubscription } from "@/lib/sheets";
+import {
+  getAllPushSubscriptions,
+  removePushSubscription,
+  getAlreadyNotifiedRecent,
+  recordPushNotified,
+} from "@/lib/sheets";
 import webpush from "web-push";
 
 export const runtime = "nodejs";
@@ -11,7 +16,6 @@ const PUSH_SECRET = process.env.PUSH_SEND_SECRET || "";
 
 export async function POST(req: NextRequest) {
   try {
-    // Verify shared secret so only GAS/Twilio can trigger sends
     const authHeader = req.headers.get("x-push-secret");
     if (!PUSH_SECRET || authHeader !== PUSH_SECRET) {
       return NextResponse.json(
@@ -31,6 +35,7 @@ export async function POST(req: NextRequest) {
 
     const body = await req.json();
     const agent = body.agent || "Unknown";
+    const conferenceName = body.conference_name || "";
     const callerNumber = body.caller_number || "";
     const ts = body.timestamp ? new Date(body.timestamp) : new Date();
     const timeStr = ts.toLocaleTimeString("en-US", {
@@ -39,12 +44,32 @@ export async function POST(req: NextRequest) {
       timeZone: "America/Toronto",
     });
 
+    // Deduplication: skip if this agent+conference was already notified recently
+    if (agent && conferenceName) {
+      try {
+        const alreadyNotified = await getAlreadyNotifiedRecent();
+        const key = `${agent}::${conferenceName}`;
+        if (alreadyNotified.has(key)) {
+          return NextResponse.json({
+            ok: true,
+            sent: 0,
+            failed: 0,
+            total: 0,
+            skipped: true,
+            reason: "already_notified",
+          });
+        }
+      } catch {
+        // Dedup check failed — proceed with send (fail-open)
+      }
+    }
+
     const payload = JSON.stringify({
       title: "Inbound Call Taken",
       body: `Agent ${agent} took a call at ${timeStr} ET` +
         (callerNumber ? ` from ${callerNumber}` : ""),
       url: "/dashboard",
-      tag: "tu-call-" + Date.now(),
+      tag: "tu-call-" + (conferenceName ? conferenceName.slice(-8) : Date.now()),
     });
 
     const subs = await getAllPushSubscriptions();
@@ -75,7 +100,12 @@ export async function POST(req: NextRequest) {
       })
     );
 
-    void results; // allSettled always resolves
+    void results;
+
+    // Record that we notified for this agent+conference
+    if (agent && conferenceName) {
+      recordPushNotified(agent, conferenceName).catch(() => {});
+    }
 
     return NextResponse.json({ ok: true, sent, failed, total: subs.length });
   } catch (err: unknown) {
