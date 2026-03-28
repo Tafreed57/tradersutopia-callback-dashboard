@@ -428,6 +428,10 @@ async function ensureLiveCallsSheet() {
   }
 }
 
+const STALE_CALL_THRESHOLD_MS = 2 * 60 * 60 * 1000; // 2 hours
+let _lastStaleCleanup = 0;
+const STALE_CLEANUP_INTERVAL_MS = 60 * 1000; // rate-limit cleanup to once per minute
+
 export async function getLiveCalls(opts?: {
   status?: "LIVE" | "ENDED" | "all";
 }): Promise<LiveCall[]> {
@@ -443,6 +447,52 @@ export async function getLiveCalls(opts?: {
   });
 
   const rows = res.data.values || [];
+
+  // Auto-expire stale LIVE calls (rate-limited)
+  const now = Date.now();
+  if (now - _lastStaleCleanup > STALE_CLEANUP_INTERVAL_MS) {
+    _lastStaleCleanup = now;
+    const staleUpdates: { range: string; values: string[][] }[] = [];
+
+    for (let i = 0; i < rows.length; i++) {
+      const status = (rows[i][4] || "").trim();
+      if (status !== "LIVE") continue;
+
+      const startTime = rows[i][3] || "";
+      const start = new Date(startTime).getTime();
+      if (isNaN(start)) continue;
+
+      if (now - start > STALE_CALL_THRESHOLD_MS) {
+        const rowNum = i + 2;
+        staleUpdates.push(
+          { range: `${tab}!E${rowNum}`, values: [["ENDED"]] },
+          { range: `${tab}!F${rowNum}`, values: [["auto-expired"]] },
+          { range: `${tab}!G${rowNum}`, values: [[new Date().toISOString()]] }
+        );
+        rows[i][4] = "ENDED";
+        rows[i][5] = "auto-expired";
+        rows[i][6] = new Date().toISOString();
+      }
+    }
+
+    if (staleUpdates.length > 0) {
+      try {
+        await sheets.spreadsheets.values.batchUpdate({
+          spreadsheetId,
+          requestBody: {
+            valueInputOption: "RAW",
+            data: staleUpdates,
+          },
+        });
+        console.log(
+          `[sheets] Auto-expired ${staleUpdates.length / 3} stale LIVE calls (threshold: ${STALE_CALL_THRESHOLD_MS / 3600000}h)`
+        );
+      } catch (cleanupErr) {
+        console.error("[sheets] Stale cleanup write failed:", cleanupErr);
+      }
+    }
+  }
+
   let calls: LiveCall[] = rows.map((row) => ({
     agentNumber: row[0] || "",
     conferenceName: row[1] || "",
@@ -459,6 +509,72 @@ export async function getLiveCalls(opts?: {
   }
 
   return calls;
+}
+
+/**
+ * Mark a specific live call as ENDED. Idempotent — safe to call multiple times.
+ * Used by the /api/live-calls/end endpoint as a redundant backup to GAS.
+ */
+export async function endLiveCall(opts: {
+  agent: string;
+  conferenceName: string;
+  callDuration?: string;
+  timestamp?: string;
+}): Promise<boolean> {
+  const sheets = getSheets();
+  const spreadsheetId = SHEET_ID();
+  const tab = LIVE_CALLS_TAB();
+
+  await ensureLiveCallsSheet();
+
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId,
+    range: `${tab}!A2:G`,
+  });
+
+  const rows = res.data.values || [];
+  const normalize = (n: string) => n.trim().replace(/^\+/, "");
+  const incomingAgent = normalize(opts.agent);
+
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const rowAgent = normalize(rows[i][0] || "");
+    const rowConference = (rows[i][1] || "").trim();
+    const rowStatus = (rows[i][4] || "").trim();
+
+    if (
+      rowAgent === incomingAgent &&
+      rowConference === opts.conferenceName &&
+      rowStatus === "LIVE"
+    ) {
+      const rowNum = i + 2;
+      await sheets.spreadsheets.values.batchUpdate({
+        spreadsheetId,
+        requestBody: {
+          valueInputOption: "RAW",
+          data: [
+            { range: `${tab}!E${rowNum}`, values: [["ENDED"]] },
+            {
+              range: `${tab}!F${rowNum}`,
+              values: [[opts.callDuration || ""]],
+            },
+            {
+              range: `${tab}!G${rowNum}`,
+              values: [[opts.timestamp || new Date().toISOString()]],
+            },
+          ],
+        },
+      });
+      console.log(
+        `[sheets] Marked row ${rowNum} as ENDED for agent ${opts.agent} on ${opts.conferenceName}`
+      );
+      return true;
+    }
+  }
+
+  console.log(
+    `[sheets] No LIVE row found for agent ${opts.agent} on ${opts.conferenceName} (already ended or no-op)`
+  );
+  return false;
 }
 
 // ── Push Subscriptions ────────────────────────────────────────────────────────
